@@ -18,8 +18,8 @@ minutes for large files). But in exchange you get a beautiful surface contour!
 Also, since the pipeline is streamed, and most data is destructed at the end
 (by directly processing it), large maps can be handled on mediocre machines.
 
-Idea for caching processed visualization
-----------------------------------------
+Idea for decentralized caching processed visualizations
+-------------------------------------------------------
 So we have no resources to set up a central server. But how cool would it be if
 all the client-side computed contour meshes could be shared? Well, there is, a
 way. Even though this is not the most elegant solution, one way to do this is to
