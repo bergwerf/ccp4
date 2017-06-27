@@ -197,7 +197,7 @@ Image createImageFromDensityMapSlice(DensityMap map, int axis, int slice) {
   var imageI = 0, dataI = 0;
   while (imageI < imageData.length) {
     final density = map.data[offset + dataI];
-    var value = ((density - map.aMin) / (map.aMax - map.aMin) * 255).round();
+    final value = ((density - map.aMin) / (map.aMax - map.aMin) * 255).round();
     imageData[imageI++] = value;
     imageData[imageI++] = value;
     imageData[imageI++] = value;

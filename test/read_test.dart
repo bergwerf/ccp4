@@ -25,7 +25,7 @@ void main() {
       final center = (map.size.x / 2).round();
       final slice = createImageFromDensityMapSlice(map, i, center);
       final pngData = new PngEncoder().encodeImage(slice);
-      final pngFile = new File('test/emd_$emdbid_slice_$i.png');
+      final pngFile = new File('test/emd_${emdbid}_slice_$i.png');
       await pngFile.writeAsBytes(pngData);
     }
   }, timeout: new Timeout(new Duration(minutes: 10)));
