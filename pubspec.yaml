@@ -8,5 +8,7 @@ environment:
 dependencies:
   image:        ^1.1.27
   vector_math:  ^2.0.4
+  logging:      ^0.11.3+1
 dev_dependencies:
   test:         ^0.12.23
+  http:         ^0.11.3+13
