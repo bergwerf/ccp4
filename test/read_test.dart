@@ -20,7 +20,7 @@ void main() {
 
   test('Read CCP4 .map file with dart:io GZIP', () async {
     // Read example file.
-    final emdbid = 3491;
+    final emdbid = 8514;
     final file = new File('test/emd_$emdbid.map.gz');
     final bytes = await file.readAsBytes();
     final uncompressed = GZIP.decoder.convert(bytes);
@@ -36,8 +36,8 @@ void main() {
       final pngFile = new File('test/emd_${emdbid}_slice_$i.png');
       await pngFile.writeAsBytes(pngData);
     }
-  }, skip: false, timeout: new Timeout(new Duration(minutes: 10)));
-  
+  }, skip: true, timeout: new Timeout(new Duration(minutes: 10)));
+
   test('Read CCP4 .map file with async GZIP and http', () async {
     // Get file stream from EBI server.
     final emdbid = 8514;
@@ -45,12 +45,12 @@ void main() {
     final uri = Uri.parse('http://ftp.ebi.ac.uk/pub/databases/emdb'
         '/structures/EMD-$emdbid/map/emd_$emdbid.map.gz');
     final streamedResponse = await client.send(new http.Request('GET', uri));
-    
+
     final stream = decodeGzip(streamedResponse.stream);
     final uncompressed = new List<int>();
     await stream.forEach((chunk) => uncompressed.addAll(chunk));
     final buffer = new Uint8List.fromList(uncompressed).buffer;
-    
+
     final map = readCCP4Map(buffer, true);
     expect(await map.loaded, equals(true));
 
@@ -62,5 +62,5 @@ void main() {
       final pngFile = new File('test/emd_${emdbid}_slice_$i.png');
       await pngFile.writeAsBytes(pngData);
     }
-  }, skip: true, timeout: new Timeout(new Duration(minutes: 10)));
+  }, skip: false, timeout: new Timeout(new Duration(minutes: 10)));
 }

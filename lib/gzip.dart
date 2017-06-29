@@ -15,66 +15,64 @@ import 'package:logging/logging.dart';
 
 final _log = new Logger('ccp4.gzip');
 
+/// Not enough data available in stream.
+class NotEnoughData {
+  final bool finalChunk;
+  NotEnoughData(this.finalChunk);
+}
+
 /// Async generic stream reader. Can be connected to a Stream<List<T>>.
 class ChunkedStreamReader<T> {
   final Stream<List<T>> _stream;
   final _buffer = new List<T>();
-  Future<bool> _nextChunk;
-  var _counter = 0;
+  Iterator _iterator;
+  var _offset = 0;
+  var _done = false;
 
   ChunkedStreamReader(this._stream) {
-    var nextChunkCompleter = new Completer<bool>();
-    _nextChunk = nextChunkCompleter.future;
     _stream.listen((chunk) {
+      _log.info('Received chunk of ${chunk.length} bytes');
       // Chunk is appended to buffer.
       _buffer.addAll(chunk);
-      nextChunkCompleter.complete(false);
-
-      // Refresh chunk completer.
-      nextChunkCompleter = new Completer<bool>();
-      _nextChunk = nextChunkCompleter.future;
     }, onDone: () {
-      nextChunkCompleter.complete(true);
+      _done = true;
     });
   }
 
-  /// Take next [n] elements in the stream. If the stream closes in between, an
-  /// exception is thrown.
-  Future<List<T>> take(int n) async {
-    // Remove [n] elements from the beginning of the buffer. If the buffer is
-    // too short, we have to wait for a new chunk.
-    while (_buffer.length < n) {
-      // Await next chunk. If this is the end instead of a chunk, throw an error
-      if (await _nextChunk) {
-        throw new Exception('not enough data is available in the stream');
+  /// Take next [n] elements in the buffer.
+  List<T> take(int n) {
+    assert(_iterator != null);
+
+    // Iterate to next [n] elements.
+    final data = new List<T>(n);
+    for (var i = 0; i < data.length; i++) {
+      if (!_iterator.moveNext()) {
+        throw new NotEnoughData(_done);
+      } else {
+        _offset++;
+        data[i] = _iterator.current;
       }
     }
-    
-    _counter += n;
-    if (_counter % 1000 == 0) {
-      _log.info('processed/buffer = $_counter/${_buffer.length}');
-    }
 
-    // We have buffered enough data, now remove it from the buffer.
-    final list = _buffer.getRange(0, n).toList();
-    _buffer.removeRange(0, n);
-    return list;
+    /* (_offset % 1000 == 0) {
+      _log.info('Buffer length: ${_buffer.length}, offset: $_offset');
+    }*/
+
+    return data;
   }
 
   /// Shorthand for consuming only a single element.
-  Future<T> single() async {
-    return (await take(1)).first;
-  }
+  T single() => take(1).first;
 }
 
 /// Read null terminated string from given ChunkedStreamReader<int> [reader].
-Future<String> readNullTerminatedString(ChunkedStreamReader<int> reader) async {
+String readNullTerminatedString(ChunkedStreamReader<int> reader) {
   // Take single integers untill this integer is 0.
   final buffer = new List<int>();
-  var value = await reader.single();
+  var value = reader.single();
   while (value != 0) {
     buffer.add(value);
-    value = await reader.single();
+    value = reader.single();
   }
   return new String.fromCharCodes(buffer);
 }
@@ -90,7 +88,7 @@ int uint(List<int> bytes) {
 }
 
 /// Function for bit reader to get next byte.
-typedef Future<int> BitReaderNextByte();
+typedef int BitReaderNextByte();
 
 /// Generic bit reader.
 class BitReader {
@@ -107,13 +105,13 @@ class BitReader {
   }
 
   // Get [n] bits.
-  Future<int> shift(int n, [bool deleteFromBuffer = true]) async {
+  int shift(int n, [bool deleteFromBuffer = true]) {
     // Worst case scenario is forcing the use of a bigint.
     assert(n <= 64 - 8);
 
     // While buffer is not large enough, add next byte to buffer.
     while (_length < n) {
-      final octet = await _nextByte();
+      final octet = _nextByte();
       _buffer |= octet << _length;
       _length += 8;
     }
@@ -182,11 +180,36 @@ HuffmanTable createHuffmanTableFromLengths(List<int> lengths) {
 /// The returned stream is a single-subscription stream.
 Stream<List<int>> decodeGzip(Stream<List<int>> input) {
   // Create input stream reader and output stream controller.
-  final inStream = new ChunkedStreamReader<int>(input);
+  final inputReader = new ChunkedStreamReader<int>(input);
   final outStream = new StreamController<List<int>>();
 
-  // Start decoding.
-  _gzipStart(inStream, outStream);
+  // Keep re-trying.
+  scheduleMicrotask(() async {
+    var started = false;
+    while (!started) {
+      try {
+        // Reset iterator.
+        inputReader._iterator = inputReader._buffer.iterator;
+
+        await _gzipStart(inputReader, outStream);
+        started = true;
+      } on NotEnoughData catch (e) {
+        if (e.finalChunk) {
+          outStream.addError(e);
+        } else {
+          // Wait for N ms to give the buffer time to catch up.
+          const wait = 100;
+          _log.info('Not enough data, pausing ${wait}ms');
+          await new Future.delayed(
+              new Duration(milliseconds: wait), () => true);
+
+          continue;
+        }
+      } catch (e, stackTrace) {
+        outStream.addError(e);
+      }
+    }
+  });
 
   return outStream.stream;
 }
@@ -203,45 +226,45 @@ Future<Null> _gzipStart(
   const flagComment = 16;
 
   // Decode header.
-  final signature = uint(await input.take(2));
+  final signature = uint(input.take(2));
   if (signature != gzipSignature) {
     throw new Exception('invalid GZip signature: $signature');
   }
 
-  final compressionMethod = await input.single();
+  final compressionMethod = input.single();
   if (compressionMethod != gzipDeflate) {
     throw new Exception('invalid GZip compression method');
   }
 
-  final flags = await input.single();
-  //final fileModTime = uint(await input.take(4));
-  //final extraFlags = await input.single();
-  //final osType = await input.single();
-  await input.take(6);
+  final flags = input.single();
+  //final fileModTime = uint(input.take(4));
+  //final extraFlags = input.single();
+  //final osType = input.single();
+  input.take(6);
 
   if (flags & flagExtra != 0) {
-    final t = uint(await input.take(2));
-    await input.take(t);
+    final t = uint(input.take(2));
+    input.take(t);
   }
 
   if (flags & flagName != 0) {
-    await readNullTerminatedString(input);
+    readNullTerminatedString(input);
   }
 
   if (flags & flagComment != 0) {
-    await readNullTerminatedString(input);
+    readNullTerminatedString(input);
   }
 
   if (flags & flagHcrc != 0) {
-    await input.take(2);
+    input.take(2);
   }
-  
+
   _log.info('Decoded header');
 
   // Inflate.
   await _zlibInflate(input, output);
 
-  // TODO: verify
+  output.close();
 }
 
 Future<Null> _zlibInflate(
@@ -252,98 +275,138 @@ Future<Null> _zlibInflate(
   final slidingWindow = new List<int>();
 
   var finalBlock = false;
+  var blockNumber = 0;
   while (!finalBlock) {
     // Trim sliding window.
     if (slidingWindow.length > _lz77WindowSize) {
       slidingWindow.removeRange(0, slidingWindow.length - _lz77WindowSize);
     }
 
-    // Read block header.
-    finalBlock = (await bitReader.shift(1)) != 0;
-    final blockType = await bitReader.shift(2);
-    
-    
-    _log.info('Block BFINAL = $finalBlock, BTYPE = $blockType');
-
-    // Block types
-    const blockUncompressed = 0;
-    const blockFixedHuffman = 1;
-    const blockDynamicHuffman = 2;
-
-    switch (blockType) {
-      case blockUncompressed:
-        bitReader.reset();
-        final len = uint(await input.take(2));
-        final nlen = uint(await input.take(2));
-
-        // Check length.
-        if (len != ~nlen) {
-          throw new Exception('invalid block header (BLOCK_UNCOMPRESSED)');
-        }
-
-        // Get chunk and write to output stream and sliding window.
-        final chunk = await input.take(len);
-        output.add(chunk);
-        slidingWindow.addAll(chunk);
-
-        break;
-
-      case blockFixedHuffman:
-        final chunk = await _zlibHuffmanDecode(
-            bitReader, slidingWindow, _fixedLiteralTable, _fixedDistanceTable);
-        output.add(chunk);
-
-        break;
-
-      case blockDynamicHuffman:
-        // Get Huffman table parameters (for lengths table, literal table,
-        // distance table)
-        final literalSize = (await bitReader.shift(5)) + 257;
-        final distanceSize = (await bitReader.shift(5)) + 1;
-        final lengthSize = (await bitReader.shift(4)) + 4;
-
-        // Create Huffman table for lengths.
-        final lengthLengths = new Uint8List(_huffmanOrder.length);
-        for (int i = 0; i < lengthSize; ++i) {
-          lengthLengths[_huffmanOrder[i]] = await bitReader.shift(3);
-        }
-        final lengthTable = createHuffmanTableFromLengths(lengthLengths);
-
-        // Decode dynamic Huffman tables for literals and distances.
-        final literalTable = await _decodeDynamicHuffmanTable(
-            bitReader, literalSize, lengthTable);
-        final distanceTable = await _decodeDynamicHuffmanTable(
-            bitReader, distanceSize, lengthTable);
-
-        // Decode chunk.
-        final chunk = await _zlibHuffmanDecode(
-            bitReader, slidingWindow, literalTable, distanceTable);
-        output.add(chunk);
-
-        break;
-
-      default:
-        throw new Exception('unrecognized zlib deflate block type: blockType');
-    }
-
     // Rewind bit reader so that its buffer holds 0-7 bits of the current byte.
     // This way we can nicely align with the byte frame once we arrive in an
     // uncompressed block.
+    var offset = input._offset;
     while (bitReader._length > 8) {
-      final byte = bitReader._buffer & 0xff;
       bitReader.delete(8);
-      input._buffer.insert(0, byte);
+      offset--;
     }
+
+    // Store bit reader state.
+    final bitReaderBuffer = bitReader._buffer;
+    final bitReaderLength = bitReader._length;
+
+    // Remove chunk reader offset.
+    input._buffer.removeRange(0, offset);
+    input._offset = 0;
+
+    // Reset chunk reader iterator.
+    input._iterator = input._buffer.iterator;
+
+    // Try parse block with currenly buffered data.
+    try {
+      // Read block header.
+      finalBlock = bitReader.shift(1) != 0;
+      final blockType = bitReader.shift(2);
+
+      _log.info('Block #$blockNumber BFINAL = $finalBlock, BTYPE = $blockType');
+
+      // Block types
+      const blockUncompressed = 0;
+      const blockFixedHuffman = 1;
+      const blockDynamicHuffman = 2;
+
+      switch (blockType) {
+        case blockUncompressed:
+          bitReader.reset();
+          final len = uint(input.take(2));
+          final nlen = uint(input.take(2));
+
+          // Check length.
+          if (len != ~nlen) {
+            throw new Exception('invalid block header (BLOCK_UNCOMPRESSED)');
+          }
+
+          // Get chunk and write to output stream and sliding window.
+          final chunk = input.take(len);
+          output.add(chunk);
+          slidingWindow.addAll(chunk);
+
+          break;
+
+        case blockFixedHuffman:
+          final chunk = _zlibHuffmanDecode(bitReader, slidingWindow,
+              _fixedLiteralTable, _fixedDistanceTable);
+          output.add(chunk);
+
+          break;
+
+        case blockDynamicHuffman:
+          // Get Huffman table parameters (for lengths table, literal table,
+          // distance table)
+          final literalSize = (bitReader.shift(5)) + 257;
+          final distanceSize = (bitReader.shift(5)) + 1;
+          final lengthSize = (bitReader.shift(4)) + 4;
+
+          // Create Huffman table for lengths.
+          final lengthLengths = new Uint8List(_huffmanOrder.length);
+          for (int i = 0; i < lengthSize; i++) {
+            lengthLengths[_huffmanOrder[i]] = bitReader.shift(3);
+          }
+          final lengthTable = createHuffmanTableFromLengths(lengthLengths);
+
+          // Decode dynamic Huffman tables for literals and distances.
+          final literalTable = _zlibDecodeDynamicHuffmanTable(
+              bitReader, literalSize, lengthTable);
+          final distanceTable = _zlibDecodeDynamicHuffmanTable(
+              bitReader, distanceSize, lengthTable);
+
+          _log.info('Decoded dynamic Huffman table');
+
+          // Decode chunk.
+          final chunk = _zlibHuffmanDecode(
+              bitReader, slidingWindow, literalTable, distanceTable);
+          output.add(chunk);
+
+          break;
+
+        default:
+          throw new Exception('illegal deflate BTYPE: $blockType');
+      }
+
+      blockNumber++;
+    } on NotEnoughData catch (e) {
+      if (!e.finalChunk) {
+        // Reset bit reader state.
+        bitReader._buffer = bitReaderBuffer;
+        bitReader._length = bitReaderLength;
+
+        // Reset chunk reader offset.
+        input._offset = 0;
+
+        // Wait for N ms to give the buffer time to catch up.
+        // TODO: this parameter could be determined dynamically
+        const wait = 10;
+        _log.info('Not enough data, pausing ${wait}ms');
+        await new Future.delayed(new Duration(milliseconds: wait), () => true);
+
+        continue;
+      } else {
+        rethrow;
+      }
+    }
+
+    _log.info('Processed block covering ${input._offset} bytes');
   }
 }
 
 /// Read next huffman code using bitreader.
-Future<int> _readNextHuffmanCode(
-    BitReader bitReader, HuffmanTable table) async {
+int _readNextHuffmanCode(BitReader bitReader, HuffmanTable table) {
   // Get huffman table index.
-  final idx = await bitReader.shift(table.maxCodeLength, false);
+  assert(table.maxCodeLength > 0);
+  final idx = bitReader.shift(table.maxCodeLength, false);
 
   // Get length of associated element, and remove this from the bitreader.
+  assert(table.lengthTable[idx] > 0);
   bitReader.delete(table.lengthTable[idx]);
 
   return table.codeTable[idx];
@@ -351,17 +414,17 @@ Future<int> _readNextHuffmanCode(
 
 /// Decode Huffman table from [bitReader] using a Huffman [lengthTable] for the
 /// lengths.
-Future<HuffmanTable> _decodeDynamicHuffmanTable(
-    BitReader bitReader, int size, HuffmanTable lengthTable) async {
+HuffmanTable _zlibDecodeDynamicHuffmanTable(
+    BitReader bitReader, int size, HuffmanTable lengthTable) {
   final lengths = new Uint8List(size);
   var prev = 0;
   var i = 0;
   while (i < size) {
-    final code = await _readNextHuffmanCode(bitReader, lengthTable);
+    final code = _readNextHuffmanCode(bitReader, lengthTable);
     switch (code) {
       case 16:
         // Repeat last code.
-        var repeat = 3 + await bitReader.shift(2);
+        var repeat = 3 + bitReader.shift(2);
         while (repeat-- > 0) {
           lengths[i++] = prev;
         }
@@ -369,7 +432,7 @@ Future<HuffmanTable> _decodeDynamicHuffmanTable(
 
       case 17:
         // Repeat 0s.
-        var repeat = 3 + await bitReader.shift(3);
+        var repeat = 3 + bitReader.shift(3);
         while (repeat-- > 0) {
           lengths[i++] = 0;
         }
@@ -378,7 +441,7 @@ Future<HuffmanTable> _decodeDynamicHuffmanTable(
 
       case 18:
         // Repeat more 0s.
-        var repeat = 11 + await bitReader.shift(7);
+        var repeat = 11 + bitReader.shift(7);
         while (repeat-- > 0) {
           lengths[i++] = 0;
         }
@@ -397,17 +460,14 @@ Future<HuffmanTable> _decodeDynamicHuffmanTable(
   return createHuffmanTableFromLengths(lengths);
 }
 
-Future<List<int>> _zlibHuffmanDecode(
-    BitReader bitReader,
-    List<int> slidingWindow,
-    HuffmanTable literalTable,
-    HuffmanTable distanceTable) async {
+List<int> _zlibHuffmanDecode(BitReader bitReader, List<int> slidingWindow,
+    HuffmanTable literalTable, HuffmanTable distanceTable) {
   // Note: we add new bytes to the sliding window.
   final initialSWLength = slidingWindow.length;
 
   var endOfBlock = false;
   while (!endOfBlock) {
-    final code = await _readNextHuffmanCode(bitReader, literalTable);
+    final code = _readNextHuffmanCode(bitReader, literalTable);
 
     assert(code >= 0 && code <= 285);
 
@@ -427,13 +487,12 @@ Future<List<int>> _zlibHuffmanDecode(
 
     final lengthCode = code - 257;
     int copyLength = _huffmanlz77Length[lengthCode] +
-        await bitReader.shift(_huffmanlz77LengthExtraBitCount[lengthCode]);
+        bitReader.shift(_huffmanlz77LengthExtraBitCount[lengthCode]);
 
-    final distanceCode = await _readNextHuffmanCode(bitReader, distanceTable);
+    final distanceCode = _readNextHuffmanCode(bitReader, distanceTable);
     if (distanceCode >= 0 && distanceCode <= 29) {
       final int copyDistance = _huffmanlz77Distance[distanceCode] +
-          await bitReader
-              .shift(_huffmanlz77DistanceExtraBitCount[distanceCode]);
+          bitReader.shift(_huffmanlz77DistanceExtraBitCount[distanceCode]);
 
       // lz77 decode
       while (copyLength > 0) {
@@ -499,7 +558,7 @@ const int _lz77MaxCopySize = 258;
 /// Huffman order
 const List<int> _huffmanOrder = const [
   //
-  16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 15, 1
+  16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
 ];
 
 /// Huffman length of lz77 code.
